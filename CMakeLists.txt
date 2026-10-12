@@ -77,12 +77,27 @@ if (EXISTS /opt/rocm)
 endif()
 
 if (ENGINE_ENABLE_HIP)
+  # ROCm's HIP linker defaults to PIE; host GCC need not do so. Build all
+  # participating objects as position-independent code for mixed toolchains.
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
   enable_language(HIP)
   find_package(hip REQUIRED)
+  # Apply the host-header workaround to every HIP consumer, including tests.
+  # Do not force-include it in HIP kernel translation units.
+  target_compile_options(hip::host INTERFACE
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_SOURCE_DIR}/src/core/hip/host_header_compat.hpp>")
   find_package(hipblas REQUIRED)
   find_package(hipblaslt REQUIRED)
   find_package(rocblas REQUIRED)
   find_package(rocm-core CONFIG QUIET)
+
+  # The HIP compiler treats ROCm library paths as implicit link directories,
+  # so CMake may omit them from RPATH. Native installs still need these paths.
+  foreach(rocm_target hip::amdhip64 roc::hipblas roc::hipblaslt roc::rocblas)
+    list(APPEND CMAKE_BUILD_RPATH "$<TARGET_FILE_DIR:${rocm_target}>")
+    list(APPEND CMAKE_INSTALL_RPATH "$<TARGET_FILE_DIR:${rocm_target}>")
+  endforeach()
+
   find_path(HIPCUB_INCLUDE_DIR hipcub/hipcub.hpp REQUIRED)
   find_path(ROCPRIM_INCLUDE_DIR rocprim/rocprim.hpp REQUIRED)
   find_path(ROCWMMA_INCLUDE_DIR rocwmma/rocwmma.hpp REQUIRED)
@@ -1147,6 +1162,11 @@ if (BUILD_TESTING)
     set_tests_properties(hip_memory_visibility_driver_test PROPERTIES
       LABELS "gpu;hip;gfx1151"
       ENVIRONMENT "HSA_USERPTR_FOR_PAGED_MEM=0")
+
+    add_executable(hip_header_compat_test tests/core/hip_header_compat_test.cpp)
+    target_link_libraries(hip_header_compat_test PRIVATE hip::host)
+    add_test(NAME hip_header_compat_test COMMAND hip_header_compat_test)
+    set_tests_properties(hip_header_compat_test PROPERTIES LABELS "cpu;hip;build")
 
     add_executable(hip_weight_upload_test tests/core/hip_weight_upload_test.cpp)
     target_link_libraries(hip_weight_upload_test PRIVATE gufo_core)
