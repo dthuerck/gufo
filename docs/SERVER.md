@@ -566,10 +566,14 @@ neither has anything to apply them to.
 `stream_format`, talker `temperature`/`top_k`/`top_p`/`repetition_penalty`, and
 predictor `subtalker_dosample`/`subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p`.
 Base additionally accepts `reference_audio`, `reference_text`, `voice_clone_mode`.
-Unknown fields are rejected. `response_format` supports buffered `wav` and
-streaming `pcm`; `stream_format: "sse"` emits OpenAI audio events with base64
-PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
-`max_new_tokens` at 8192 (default 3000). Output is 24 kHz mono 16-bit PCM.
+Unknown fields are rejected. `response_format` supports buffered `wav`,
+streaming `pcm` and streaming `mp3`. An MP3 reply arrives as `audio/mpeg`:
+MPEG-2 Layer III at 24 kHz, mono, 160 kbit/s, the highest bitrate that format
+carries, so it is lossy where `pcm` and `wav` are not. `stream_format: "sse"`
+emits OpenAI audio events with base64 audio, so it accepts `pcm` or `mp3` and
+refuses `wav`, whose RIFF header needs the total length. `speed` supports `1.0`
+only; input is capped at 16384 UTF-8 bytes and `max_new_tokens` at 8192
+(default 3000). Output is 24 kHz mono 16-bit PCM.
 
 `GET /v1/audio/speech/stream` upgrades to the vLLM-Omni incremental-text
 WebSocket protocol. [TTS streaming examples](models/qwen3-tts/README.md#sampling-and-streaming)

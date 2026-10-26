@@ -61,7 +61,7 @@ Greedy generation can fail to reach EOS; bound diagnostic requests with
 `max_new_tokens`. Read the [quality limits](QUALITY.md#known-limitations).
 
 WAV is buffered so its length header is correct. To receive audio as it is
-generated, request `response_format: "pcm"`:
+generated, request `response_format: "pcm"` or `response_format: "mp3"`:
 
 ```sh
 curl -N http://127.0.0.1:8080/v1/audio/speech \
@@ -70,10 +70,14 @@ curl -N http://127.0.0.1:8080/v1/audio/speech \
   --output speech.pcm
 ```
 
-PCM is signed little-endian 16-bit mono at 24 kHz. `stream_format: "sse"`
-instead emits OpenAI `speech.audio.delta` events containing base64 `audio`,
-then `speech.audio.done`; SSE requires PCM. This streams the same generation
-as a complete-text request, without sentence splitting or a server flag.
+PCM is signed little-endian 16-bit mono at 24 kHz. MP3 is MPEG-2 Layer III at
+24 kHz, mono, 160 kbit/s, and arrives as `audio/mpeg`. MP3 is lossy, so keep
+PCM for work that needs the samples themselves, such as further synthesis or
+measurement. `stream_format: "sse"` instead emits OpenAI `speech.audio.delta`
+events containing base64 `audio` and the `response_format`, then
+`speech.audio.done`; SSE accepts PCM and MP3 and refuses WAV, whose header needs
+the total length. This streams the same generation as a complete-text request,
+without sentence splitting or a server flag.
 
 For text arriving from an LLM, connect a WebSocket to
 `/v1/audio/speech/stream` and send the vLLM-Omni speech protocol:

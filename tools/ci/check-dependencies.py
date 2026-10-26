@@ -38,6 +38,8 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "ICU",
     "curl / libcurl",
     "FFmpeg",
+    # MP3 replies from /v1/audio/speech, linked by src/core/audio/mp3_encode.cpp.
+    "LAME (libmp3lame)",
 }
 
 REQUIRED_EVALUATION_COMPONENTS = {
@@ -111,6 +113,8 @@ def verify_dependencies(
             "icu",
             "curl",
             "ffmpeg-headless",
+            # MP3 output from /v1/audio/speech needs libmp3lame and lame.h.
+            "lame",
         ]:
             if dep not in pkg_content:
                 errors.append(f"Expected dependency '{dep}' missing from {package_nix_file.name}")

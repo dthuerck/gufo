@@ -382,6 +382,7 @@
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.openssl
+              pkgsSys.lame
             ];
             src = staticAnalysisSource;
           } ''
@@ -501,6 +502,7 @@
               pkgsSys.libsndfile
               pkgsSys.soxr
               pkgsSys.openssl
+              pkgsSys.lame
             ];
             src = testSource;
           } ''

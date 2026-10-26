@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -129,6 +130,75 @@ bool HasHeader(const HttpResponse& response, std::string_view name,
   return std::ranges::any_of(response.headers, [&](const auto& header) {
     return header.first == name && header.second == value;
   });
+}
+std::string_view BodyOrEmpty(const HttpResponse& response) {
+  return response.body;
+}
+
+// The served stream has to be readable by any MP3 decoder, so every byte
+// group is checked as an MPEG frame instead of trusting the encoder. LAME is
+// configured for constant bitrate, mono, 24 kHz and no CRC, which fixes the
+// frame header bits and gives 72 * 160000 / 24000 = 480 bytes per frame.
+void CheckMp3Stream(const std::string& bytes, const char* what) {
+  constexpr int kBitrateKbps = 160;
+  constexpr int kSampleRate = 24000;
+  std::size_t offset = 0;
+  int frames = 0;
+  while (offset + 4 <= bytes.size()) {
+    const auto at = [&](std::size_t index) {
+      return static_cast<unsigned char>(bytes[offset + index]);
+    };
+    // Eleven sync bits, then version (10 is MPEG-2), layer (01 is Layer III)
+    // and the protection bit, which is set when no CRC follows.
+    if (at(0) != 0xFF || (at(1) & 0xE0U) != 0xE0U) {
+      break;
+    }
+    Check((at(1) & 0x18U) == 0x10U, "mp3 frames carry the MPEG-2 version");
+    Check((at(1) & 0x06U) == 0x02U, "mp3 frames carry Layer III");
+    Check((at(1) & 0x01U) == 0x01U, "mp3 frames carry no CRC");
+    Check((at(2) >> 4) == 14U, "mp3 frames carry the 160 kbit/s bitrate");
+    Check(((at(2) >> 2) & 0x03U) == 1U, "mp3 frames carry 24 kHz");
+    Check(((at(3) >> 6) & 0x03U) == 3U, "mp3 frames carry one channel");
+    const std::size_t padding = (at(2) >> 1) & 1U;
+    offset += 72U * kBitrateKbps * 1000U / kSampleRate + padding;
+    ++frames;
+  }
+  Check(frames > 0, what);
+  Check(offset == bytes.size(), "mp3 output ends on a frame boundary");
+}
+
+// Concatenates the audio of every SSE delta event, which is how a client has
+// to rebuild an encoded stream from base64 events.
+std::string SseAudio(const std::string& events) {
+  std::string encoded;
+  std::size_t position = 0;
+  while ((position = events.find("\"audio\":\"", position)) !=
+         std::string::npos) {
+    position += std::strlen("\"audio\":\"");
+    const std::size_t end = events.find('\"', position);
+    if (end == std::string::npos) {
+      Fail("SSE audio field is not terminated");
+    }
+    encoded += events.substr(position, end - position);
+    position = end;
+  }
+  std::string decoded;
+  if (!gufo::server::DecodeAudioBase64(encoded, 1U << 20U, &decoded)) {
+    Fail("SSE audio is not canonical base64");
+  }
+  return decoded;
+}
+
+std::string ConsumeBody(const HttpResponse& response) {
+  std::string body;
+  if (!response.streaming_body) {
+    Fail("response has no streaming body");
+  }
+  response.streaming_body([&](std::string_view bytes) {
+    body.append(bytes);
+    return true;
+  });
+  return body;
 }
 
 void TestSpeech() {
@@ -340,12 +410,13 @@ void TestValidationAndVoices() {
              R"({"model":"qwen3-tts","input":"x","voice":"unknown"})")
                 .status == 400,
         "unknown voice fails closed");
-  Check(
-      Send(
-          service, "POST", "/v1/audio/speech",
-          R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"mp3"})")
-              .status == 400,
-      "unsupported format fails closed");
+  const auto rejected = Send(
+      service, "POST", "/v1/audio/speech",
+      R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"flac"})");
+  Check(rejected.status == 400 &&
+            BodyOrEmpty(rejected).find("'wav', 'pcm' or 'mp3'") !=
+                std::string::npos,
+        "unsupported format fails closed and names the supported ones");
   Check(Send(service, "POST", "/v1/audio/speech",
              R"({"model":"qwen3-tts","input":"x","voice":"vivian","seed":1.5})")
                 .status == 400,
@@ -429,6 +500,74 @@ void TestBaseContract() {
         "Base speaker-embedding-only mode does not require reference text");
 }
 
+// MP3 is a streaming format: the frames concatenate, so the reply never needs
+// the total length, and the encoder runs inside the response body.
+void TestMp3() {
+  FakeRunner runner;
+  TtsService service = MakeService(&runner);
+  const HttpResponse response = Send(
+      service, "POST", "/v1/audio/speech",
+      R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"mp3"})");
+  Check(response.status == 200 && response.streaming_body && runner.calls == 0,
+        "MP3 synthesis starts when the response is consumed");
+  Check(HasHeader(response, "Content-Type", "audio/mpeg"),
+        "MP3 answers with the MPEG media type");
+  const std::string mp3 = ConsumeBody(response);
+  CheckMp3Stream(mp3, "an MP3 reply is a stream of MPEG frames");
+  Check(response.stream_log->error_code.empty(),
+        "a served MP3 stream reports no error");
+
+  const auto sse = Send(
+      service, "POST", "/v1/audio/speech",
+      R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"mp3","stream_format":"sse"})");
+  Check(sse.status == 200 && sse.streaming_body,
+        "SSE accepts an MP3 response format");
+  const std::string events = ConsumeBody(sse);
+  Check(events.find("speech.audio.done") != std::string::npos,
+        "an SSE MP3 stream ends with the terminal event");
+  CheckMp3Stream(SseAudio(events),
+                 "SSE base64 MP3 deltas rebuild the same MPEG stream");
+
+  Check(
+      Send(
+          service, "POST", "/v1/audio/speech",
+          R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"wav","stream_format":"sse"})")
+              .status == 400,
+      "SSE still refuses WAV, whose header needs the total length");
+}
+
+// The encoder is opened for the rate this service synthesizes at, so a model
+// that answers with another rate has to fail instead of labelling the already
+// written frames wrongly.
+void TestMp3SampleRateMismatch() {
+  TtsService service(TtsServiceOptions{
+      .validate_model = false,
+      .voices = {"vivian"},
+      .runner =
+          [](const auto& request, const auto&, auto* result, auto*) {
+            result->sample_rate = 48000;
+            result->samples = {0.5F, 0.25F};
+            return !request.on_audio || request.on_audio(result->samples);
+          },
+  });
+  for (const auto* format : {"audio", "sse"}) {
+    auto response = Send(
+        service, "POST", "/v1/audio/speech",
+        std::string(
+            R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"mp3","stream_format":")") +
+            format + "\"}");
+    const std::string body = ConsumeBody(response);
+    Check(response.stream_log->error_code == "invalid_audio",
+          "a sample rate the MP3 stream cannot carry reports invalid audio");
+    Check(body.find("speech.audio.done") == std::string::npos,
+          "a rate mismatch never becomes a successful terminal event");
+    Check(format == std::string_view("sse")
+              ? body.find("event: error") != std::string::npos
+              : body.empty(),
+          "a rate mismatch is only reported through the stream in use");
+  }
+}
+
 void TestInvalidWaveform() {
   for (const float sample : {std::numeric_limits<float>::quiet_NaN(),
                              std::numeric_limits<float>::infinity(),
@@ -449,25 +588,32 @@ void TestInvalidWaveform() {
     Check(wav.status == 500 &&
               wav.body.find("invalid_audio") != std::string::npos,
           "nonfinite WAV samples fail before conversion");
-    for (const auto format : {"audio", "sse"}) {
-      auto response = Send(
-          service, "POST", "/v1/audio/speech",
-          std::string(
-              R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"pcm","stream_format":")") +
-              format + "\"}");
-      std::string body;
-      response.streaming_body([&](std::string_view bytes) {
-        body.append(bytes);
-        return true;
-      });
-      Check(response.stream_log->error_code == "invalid_audio",
-            "nonfinite streaming samples report invalid audio");
-      Check(body.find("speech.audio.delta") == std::string::npos &&
-                body.find("speech.audio.done") == std::string::npos &&
-                (format == std::string_view("sse")
-                     ? body.find("event: error") != std::string::npos
-                     : body.empty()),
-            "invalid audio never becomes PCM or a successful terminal event");
+    for (const auto response_format : {"pcm", "mp3"}) {
+      for (const auto format : {"audio", "sse"}) {
+        const std::string request =
+            std::string(
+                R"json({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":")json") +
+            response_format + R"json(","stream_format":")json" + format + "\"}";
+        auto response = Send(service, "POST", "/v1/audio/speech", request);
+        std::string body;
+        if (response.streaming_body) {
+          response.streaming_body([&](std::string_view bytes) {
+            body.append(bytes);
+            return true;
+          });
+        }
+        Check(
+            response.stream_log != nullptr &&
+                response.stream_log->error_code == "invalid_audio",
+            std::string("nonfinite streaming samples report invalid audio (") +
+                response_format + "/" + format + ")");
+        Check(body.find("speech.audio.delta") == std::string::npos &&
+                  body.find("speech.audio.done") == std::string::npos &&
+                  (format == std::string_view("sse")
+                       ? body.find("event: error") != std::string::npos
+                       : body.empty()),
+              "invalid audio never becomes a stream frame or a terminal event");
+      }
     }
   }
 }
@@ -482,6 +628,8 @@ int main() {
   TestValidationAndVoices();
   TestVoiceDesignContract();
   TestBaseContract();
+  TestMp3();
+  TestMp3SampleRateMismatch();
   TestInvalidWaveform();
   std::cout << "PASS qwen3_tts_audio_api_test\n";
   return 0;

@@ -28,6 +28,7 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | libwebp | Linked; WebP decoding | `BSD-3-Clause` | 1.6.0; flake.lock | [webmproject/libwebp](https://chromium.googlesource.com/webm/libwebp) |
 | libsndfile | Linked; audio decoding | `LGPL-2.1-or-later` | 1.2.2; flake.lock | [libsndfile](https://github.com/libsndfile/libsndfile) |
 | libsoxr | Linked; audio resampling | `LGPL-2.1-or-later` | 0.1.3; flake.lock | [SoX Resampler](https://sourceforge.net/projects/soxr/) |
+| LAME (libmp3lame) | Linked; MP3 replies from `/v1/audio/speech`, see `licenses/lame.txt` | `LGPL-2.0-or-later AND LGPL-2.1-or-later` | 3.100; flake.lock | [lameproject](https://sourceforge.net/projects/lame/) |
 | FFmpeg | Separate ffmpeg/ffprobe executables for media | `GPL-3.0-or-later` (Nix build with GPL/version3 components) | 8.1.2; flake.lock | [FFmpeg](https://github.com/FFmpeg/FFmpeg) |
 | LLVM OpenMP | Windows runtime built from upstream source; Microsoft-compatible DLL naming | `Apache-2.0 WITH LLVM-exception` | 18.1.8 (`3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff`) | [LLVM](https://github.com/llvm/llvm-project/tree/llvmorg-18.1.8/openmp); [license](licenses/llvm-openmp.txt) |
 | GNU C/C++/OpenMP runtimes | System runtime libraries; no Gufo source import | `LGPL-2.1-or-later AND (GPL-3.0-or-later WITH GCC-exception-3.1)` | glibc/GCC packages in flake.lock | [GNU](https://www.gnu.org/software/) |
@@ -48,6 +49,10 @@ adapted code. Model-private changes and import boundaries are recorded in the
 [DS4 HIP import](src/models/deepseek_v4_flash/kernels/rocm/mmq/VENDOR.md),
 [Flash-Next HIP import](src/models/qwen38_flash_next/kernels/rocm/mmq/VENDOR.md)
 and [H3 quality record](docs/models/minimax-h3/QUALITY.md).
+
+libsndfile, libsoxr and libmp3lame are linked under the copyleft LGPL. Gufo
+links them as shared libraries and copies none of their source, so you can
+replace any of them with a compatible build.
 
 This software is based in part on the work of the Independent JPEG Group.
 
