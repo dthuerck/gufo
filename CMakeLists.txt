@@ -139,6 +139,28 @@ if (ENGINE_ENABLE_HIP)
   endif()
 endif()
 
+# A HIP build links its executables through the ROCm Clang driver, which asks
+# for a position-independent executable by default. A C++ compiler configured
+# without --enable-default-pie, as a host GCC beside a distribution Clang often
+# is, emits absolute relocations that such a link rejects with
+# "relocation R_X86_64_32 cannot be used against local symbol". Link with the
+# model the objects carry instead; the qualified GCC and Nix toolchains define
+# __PIE__ by default and keep the ordinary position-independent link.
+if (ENGINE_ENABLE_HIP AND NOT WIN32)
+  include(CheckCXXSourceCompiles)
+  check_cxx_source_compiles([[
+#if !defined(__PIE__)
+#error "this C++ compiler defaults to a static executable"
+#endif
+int main() { return 0; }
+]] GUFO_CXX_DEFAULTS_TO_PIE)
+  if (NOT GUFO_CXX_DEFAULTS_TO_PIE)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie")
+    message(STATUS "gufo: ${CMAKE_CXX_COMPILER_ID} builds static executables; "
+      "executables that link HIP use -no-pie")
+  endif()
+endif()
+
 function(gufo_stage_hip_runtime target)
   if (ENGINE_ENABLE_HIP AND WIN32 AND GUFO_HIP_RUNTIME_DLLS)
     add_custom_command(TARGET ${target} POST_BUILD
