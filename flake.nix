@@ -397,6 +397,7 @@
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
+              pkgsSys.lame
             ];
             src = staticAnalysisSource;
           } ''
@@ -517,6 +518,7 @@
               pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
+              pkgsSys.lame
             ];
             src = testSource;
           } ''

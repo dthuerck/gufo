@@ -13,6 +13,7 @@
   libsndfile,
   soxr,
   openssl,
+  lame,
   ffmpeg-headless,
   ccache,
   rocmPackages,
@@ -105,6 +106,7 @@ stdenv.mkDerivation {
     libsndfile
     soxr
     openssl
+    lame
     ffmpeg-headless
     rocmPackages.clr
     rocmPackages.hipblas

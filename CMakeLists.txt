@@ -91,6 +91,21 @@ pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 pkg_check_modules(SOXR REQUIRED IMPORTED_TARGET soxr)
 pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
+# MP3 replies from the text-to-speech endpoint come from libmp3lame. Gufo
+# links it rather than vendoring it: the LGPL-2.1 terms are met by dynamic
+# linking plus the notice in THIRD_PARTY_NOTICES.md and licenses/lame.txt, and
+# MPEG Layer III encoding is not something to reimplement here.
+find_path(MP3LAME_INCLUDE_DIR lame/lame.h)
+find_library(MP3LAME_LIBRARY NAMES mp3lame)
+if(NOT MP3LAME_INCLUDE_DIR OR NOT MP3LAME_LIBRARY)
+  message(FATAL_ERROR
+    "libmp3lame and lame/lame.h are required for /v1/audio/speech MP3 output. "
+    "Install lame-devel (Fedora) or libmp3lame-dev (Debian/Ubuntu).")
+endif()
+add_library(gufo_mp3lame INTERFACE)
+target_include_directories(gufo_mp3lame SYSTEM INTERFACE "${MP3LAME_INCLUDE_DIR}")
+target_link_libraries(gufo_mp3lame INTERFACE "${MP3LAME_LIBRARY}")
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
@@ -334,6 +349,7 @@ add_library(gufo_core STATIC
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
   src/core/sampling.cpp
+  src/core/audio/mp3_encode.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
@@ -341,7 +357,7 @@ add_library(gufo_core STATIC
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
   Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
-  OpenSSL::Crypto)
+  OpenSSL::Crypto gufo_mp3lame)
 
 # Family libraries come before the model that needs them; they may depend on
 # gufo_core and on each other, never on a model directory.

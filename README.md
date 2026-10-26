@@ -209,6 +209,7 @@ limits disallow those pins. Gufo leaves `HSA_USERPTR_FOR_PAGED_MEM` unchanged.
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
 | FFmpeg development libraries | Video embedding decoding and RGB conversion |
 | libsndfile, libsoxr | Audio decoding and reference-compatible resampling |
+| LAME (libmp3lame) | MP3 replies from `/v1/audio/speech` |
 | FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
 
 Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
@@ -219,7 +220,7 @@ For example, on Debian/Ubuntu the ordinary system libraries are:
 
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
-  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev libsndfile1-dev libsoxr-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev ffmpeg
+  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev libsndfile1-dev libsoxr-dev libmp3lame-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev ffmpeg
 
 # ROCm libraries from the table, named as AMD's repository ships them.
 sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \

@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "src/cli/serve/audio_stream.hpp"
+#include "src/core/audio/mp3_encode.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen3_tts/audio.hpp"
 
@@ -127,6 +128,44 @@ std::string EncodeWav(std::span<const float> samples,
     AppendU16(&output, static_cast<std::uint16_t>(pcm));
   }
   return output;
+}
+
+// One entry of the OpenAI speech API response_format field.
+enum class SpeechFormat { kWav, kPcm, kMp3 };
+
+// Synthesis emits mono audio at this rate, so a streamed MP3 always encodes
+// MPEG-2 Layer III frames and never needs a resampler. A model that emits a
+// different rate fails the stream instead of silently retiming it.
+constexpr std::uint32_t kStreamedSampleRate = 24000;
+
+constexpr std::string_view FormatName(SpeechFormat format) {
+  switch (format) {
+    case SpeechFormat::kWav:
+      return "wav";
+    case SpeechFormat::kPcm:
+      return "pcm";
+    case SpeechFormat::kMp3:
+      return "mp3";
+  }
+  return "wav";
+}
+
+constexpr std::string_view FormatContentType(SpeechFormat format) {
+  switch (format) {
+    case SpeechFormat::kWav:
+      return "audio/wav";
+    case SpeechFormat::kPcm:
+      return "audio/pcm";
+    case SpeechFormat::kMp3:
+      return "audio/mpeg";
+  }
+  return "audio/wav";
+}
+
+// True for the formats whose bytes are valid before the waveform ends, which
+// is what lets a client play the reply while the model still generates.
+constexpr bool SpeechFormatIsStreamable(SpeechFormat format) {
+  return format == SpeechFormat::kPcm || format == SpeechFormat::kMp3;
 }
 
 HttpResponse Voices(TtsService& service) {
@@ -312,14 +351,35 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
   }
   const bool sse = stream_format != nullptr && stream_format->str() == "sse";
   const auto* format = body.find("response_format");
-  const bool pcm = format != nullptr ? format->str() == "pcm" : sse;
-  if (format != nullptr && (!format->is_string() || (format->str() != "wav" &&
-                                                     format->str() != "pcm"))) {
-    return Error(400, "Bad Request", "'response_format' must be 'wav' or 'pcm'",
-                 "invalid_response_format");
+  // An SSE envelope needs a format that survives arriving in pieces. WAV
+  // cannot, because the RIFF header carries the total length, so the
+  // default keeps the buffered container only when the client asked for it
+  // by name.
+  SpeechFormat speech_format = sse ? SpeechFormat::kPcm : SpeechFormat::kWav;
+  if (format != nullptr) {
+    if (!format->is_string()) {
+      return Error(400, "Bad Request", "'response_format' must be a string",
+                   "invalid_response_format");
+    }
+    // The default follows the envelope, so a request that names WAV by hand
+    // has to overwrite it back. Without this, response_format 'wav' together
+    // with SSE would answer with PCM, a different media type than the one the
+    // client asked for.
+    if (format->str() == "wav") {
+      speech_format = SpeechFormat::kWav;
+    } else if (format->str() == "pcm") {
+      speech_format = SpeechFormat::kPcm;
+    } else if (format->str() == "mp3") {
+      speech_format = SpeechFormat::kMp3;
+    } else {
+      return Error(400, "Bad Request",
+                   "'response_format' must be 'wav', 'pcm' or 'mp3'",
+                   "invalid_response_format");
+    }
   }
-  if (sse && !pcm)
-    return Error(400, "Bad Request", "SSE audio requires response_format 'pcm'",
+  if (sse && !SpeechFormatIsStreamable(speech_format))
+    return Error(400, "Bad Request",
+                 "SSE audio requires response_format 'pcm' or 'mp3'",
                  "invalid_response_format");
   if (const json::Value* speed = body.find("speed");
       speed != nullptr && (!speed->is_number() || speed->as_double() != 1.0)) {
@@ -408,72 +468,137 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
   };
   if (validate_only)
     return {};
-  if (pcm) {
+  if (SpeechFormatIsStreamable(speech_format)) {
+    const bool mp3 = speech_format == SpeechFormat::kMp3;
+    // Incremental blocks carry no sample rate, so the encoder is opened for
+    // the rate this service synthesizes at. The final result is checked
+    // against it below, and a mismatch fails the stream rather than
+    // relabelling audio that already left at another rate.
+    auto encoder = std::make_shared<audio::Mp3StreamEncoder>();
     auto log = std::make_shared<HttpResponse::StreamLog>();
     HttpResponse response;
     response.headers = {
-        {"Content-Type", sse ? "text/event-stream" : "audio/pcm"},
+        {"Content-Type", sse ? "text/event-stream"
+                             : std::string(FormatContentType(speech_format))},
         {"Cache-Control", "no-cache"},
         {"X-Gufo-TTS-Backend", service.backend_name()}};
     response.stream_log = log;
-    response
-        .streaming_body = [&service, synthesis = std::move(synthesis),
-                           cancelled = request.is_cancelled, log,
-                           sse](const HttpResponse::BodyWriter& write) mutable {
-      const auto started = std::chrono::steady_clock::now();
-      std::size_t samples = 0;
-      bool disconnected = false;
-      bool invalid_audio = false;
-      synthesis.on_audio = [&](std::span<const float> chunk) {
-        if (cancelled && cancelled())
-          return false;
-        std::string bytes = EncodePcm16(chunk);
-        if (!chunk.empty() && bytes.empty()) {
-          invalid_audio = true;
-          return false;
-        }
-        if (sse) {
-          auto event = json::Value::object();
-          event["type"] = "speech.audio.delta";
-          event["audio"] = EncodeAudioBase64(bytes);
-          event["response_format"] = "pcm";
-          bytes = "event: speech.audio.delta\ndata: " + event.dump() + "\n\n";
-        }
-        disconnected = !write(bytes);
-        samples += chunk.size();
-        return !disconnected;
-      };
-      models::qwen3_tts::SynthesisResult result;
-      std::string error;
-      const auto check = [&] {
-        return disconnected || (cancelled && cancelled());
-      };
-      if (!service.Synthesize(synthesis, check, &result, &error)) {
-        log->error_code = invalid_audio ? "invalid_audio"
-                          : check()     ? "cancelled"
-                                        : "generation_failed";
-        if (invalid_audio)
-          error = "Qwen3-TTS produced invalid audio";
-        if (sse && !check()) {
-          auto event = json::Value::object();
-          event["type"] = "error";
-          event["message"] = error;
-          log->error_event_sent =
-              write("event: error\ndata: " + event.dump() + "\n\n");
-        }
-      } else if (sse) {
-        (void)write(
-            "event: speech.audio.done\ndata: "
-            "{\"type\":\"speech.audio.done\"}\n\n");
-      }
-      synthesis.on_audio = {};
-      log->details =
-          "model=" + service.model_id() + " stream=" + (sse ? "sse" : "pcm") +
-          " audio_ms=" + std::to_string(samples / 24) + " synthesis_ms=" +
-          std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - started)
-                             .count());
-    };
+    response.streaming_body =
+        [&service, synthesis = std::move(synthesis),
+         cancelled = request.is_cancelled, log, encoder, sse, mp3,
+         speech_format](const HttpResponse::BodyWriter& write) mutable {
+          const auto started = std::chrono::steady_clock::now();
+          std::size_t samples = 0;
+          bool disconnected = false;
+          bool invalid_audio = false;
+          std::string encoder_error;
+          if (mp3 && !encoder->Open(kStreamedSampleRate, &encoder_error)) {
+            invalid_audio = true;
+          }
+          // Everything the client receives goes through here, so an SSE
+          // envelope never carries raw audio and a raw stream never carries an
+          // event.
+          const auto emit_audio = [&](std::string bytes) {
+            if (bytes.empty()) {
+              return true;
+            }
+            if (sse) {
+              auto event = json::Value::object();
+              event["type"] = "speech.audio.delta";
+              event["audio"] = EncodeAudioBase64(bytes);
+              event["response_format"] = std::string(FormatName(speech_format));
+              bytes =
+                  "event: speech.audio.delta\ndata: " + event.dump() + "\n\n";
+            }
+            return write(bytes);
+          };
+          synthesis.on_audio = [&](std::span<const float> chunk) {
+            if (cancelled && cancelled())
+              return false;
+            std::string bytes;
+            if (mp3) {
+              if (!encoder->Append(chunk, &bytes)) {
+                invalid_audio = true;
+                return false;
+              }
+            } else {
+              bytes = EncodePcm16(chunk);
+              if (!chunk.empty() && bytes.empty()) {
+                invalid_audio = true;
+                return false;
+              }
+            }
+            disconnected = !emit_audio(std::move(bytes));
+            samples += chunk.size();
+            return !disconnected;
+          };
+          models::qwen3_tts::SynthesisResult result;
+          std::string error;
+          const auto check = [&] {
+            return disconnected || (cancelled && cancelled());
+          };
+          if (!service.Synthesize(synthesis, check, &result, &error)) {
+            log->error_code = invalid_audio ? "invalid_audio"
+                              : check()     ? "cancelled"
+                                            : "generation_failed";
+            // encoder_error is only ever set by Open, so an empty one means
+            // the waveform, not the encoder setup, is at fault.
+            if (invalid_audio)
+              error = encoder_error.empty()
+                          ? "Qwen3-TTS produced invalid audio"
+                          : "cannot open the MP3 encoder: " + encoder_error;
+            if (sse && !check()) {
+              auto event = json::Value::object();
+              event["type"] = "error";
+              event["message"] = error;
+              log->error_event_sent =
+                  write("event: error\ndata: " + event.dump() + "\n\n");
+            }
+          } else if (mp3 && result.sample_rate != encoder->sample_rate()) {
+            log->error_code = "invalid_audio";
+            error = "the model produced " + std::to_string(result.sample_rate) +
+                    " Hz audio, which does not fit the MP3 stream already sent";
+            if (sse) {
+              auto event = json::Value::object();
+              event["type"] = "error";
+              event["message"] = error;
+              log->error_event_sent =
+                  write("event: error\ndata: " + event.dump() + "\n\n");
+            }
+          } else {
+            // LAME holds back the samples that did not fill a frame, plus the
+            // encoder delay it declared. Those bytes belong to the stream, so
+            // writing them fails it rather than ending the reply with a
+            // truncated tail the client cannot decode.
+            std::string bytes;
+            if (mp3 && !encoder->Flush(&bytes)) {
+              log->error_code = "invalid_audio";
+              error = "cannot finish the MP3 stream";
+              if (sse) {
+                auto event = json::Value::object();
+                event["type"] = "error";
+                event["message"] = error;
+                log->error_event_sent =
+                    write("event: error\ndata: " + event.dump() + "\n\n");
+              }
+            } else if (!emit_audio(std::move(bytes)) && sse) {
+              log->error_event_sent = false;
+            } else if (sse) {
+              (void)write(
+                  "event: speech.audio.done\ndata: "
+                  "{\"type\":\"speech.audio.done\"}\n\n");
+            }
+          }
+          synthesis.on_audio = {};
+          log->details =
+              "model=" + service.model_id() +
+              " stream=" + (sse ? "sse" : FormatName(speech_format).data()) +
+              " audio_ms=" + std::to_string(samples / 24) + " synthesis_ms=" +
+              std::to_string(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - started)
+                      .count());
+        };
     return response;
   }
   models::qwen3_tts::SynthesisResult result;
