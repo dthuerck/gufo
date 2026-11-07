@@ -19,8 +19,11 @@ HttpResponse HandleOpenAiChatInputTokens(const HttpRequest& request,
 
 /// Shared Chat/Responses result, including unsupported-backend and prompt
 /// errors.
+/// `retry_after_seconds` is the wait a scheduler refusal advertises, matching
+/// the request that carried it.
 HttpResponse CountOpenAiInputTokens(const ChatRequest& chat,
-                                    TextGenerationBackend& backend);
+                                    TextGenerationBackend& backend,
+                                    int retry_after_seconds = 1);
 
 /// llama-server's /apply-template: the prompt a Chat Completions body renders
 /// to, with the server's reasoning defaults applied, without generating.

@@ -220,6 +220,12 @@ These apply to every modality, before or after the subcommand:
 - `maxRequestBytes` — maximum request body size. In practice: matters mostly
   for ASR, since requests carry whole audio files (the audio benchmark used
   32 MiB).
+- `retryAfter` (`--retry-after SECONDS`, default 1) — how long a refused client
+  is told to wait, sent as the `Retry-After` header on a 429 admission refusal,
+  a retryable 503, a refused connection and the loading-window 503. In
+  practice: raise it when clients retry hard against a busy server; the value
+  is a fixed hint, never a queue-drain estimate. A lost GPU context sends no
+  `Retry-After` at all, because retrying cannot help it.
 - `apiKey` — if set, requests require `Authorization: Bearer <key>`, including
   health checks. Browser CORS preflight (`OPTIONS`) remains unauthenticated.
 - `logLevel` (`--log-level <error|warn|info|debug>`, default `info`) — how much

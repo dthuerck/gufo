@@ -1189,7 +1189,7 @@ HttpResponse OpenAiResponsesInputTokens(const HttpRequest& req,
           ReadOpenAiResponseChat(body, b, &chat, &max_tokens, &sampling_config))
     return std::move(*error);
   chat.client_id = req.client_id;
-  return CountOpenAiInputTokens(chat, b);
+  return CountOpenAiInputTokens(chat, b, req.retry_after_seconds);
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1745,7 +1745,9 @@ std::string PeerAddress(int client_fd) {
 
 }  // namespace
 
-LoadingResponder::LoadingResponder(const std::string& host, int port) {
+LoadingResponder::LoadingResponder(const std::string& host, int port,
+                                   int retry_after_seconds)
+    : retry_after_seconds_(retry_after_seconds) {
   net::EnsureSocketRuntimeStarted();
   sockaddr_storage addr{};
   net::SocklenT addr_length = 0;
@@ -1791,7 +1793,8 @@ void LoadingResponder::stop() {
 void LoadingResponder::serve() {
   HttpResponse loading = Err(503, "Service Unavailable", "Loading model",
                              "unavailable_error", "loading");
-  loading.headers.emplace_back("Retry-After", "1");
+  loading.headers.emplace_back("Retry-After",
+                               std::to_string(retry_after_seconds_));
   const std::string reply = BuildResponse(loading);
   // One connection at a time is enough for probes. Read the request head
   // before replying, and after replying read what the client still sends (a
@@ -1900,7 +1903,8 @@ HttpServer::HttpServer(std::string host, int port,
       images_(std::move(images)),
       embeddings_(std::move(embeddings)),
       options_(std::move(options)) {
-  if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
+  if (options_.max_request_body_bytes == 0 || options_.max_connections == 0 ||
+      options_.retry_after_seconds <= 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
   }
   if (!options_.api_key.empty()) {
@@ -2111,7 +2115,8 @@ void HttpServer::run(bool handle_signals) {
       HttpResponse response =
           Err(503, "Service Unavailable", "connection limit reached",
               "server_error", "overloaded");
-      response.headers.emplace_back("Retry-After", "1");
+      response.headers.emplace_back(
+          "Retry-After", std::to_string(options_.retry_after_seconds));
       (void)SendAll(client_fd, BuildResponse(response));
       net::CloseSocket(client_fd);
     }
@@ -2307,6 +2312,8 @@ void HttpServer::handle_connection(int client_fd,
   if (auto peer = PeerAddress(client_fd); !peer.empty())
     req.client_id = std::move(peer);
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
+  // Refusals report the configured wait; routes see it on the request.
+  req.retry_after_seconds = options_.retry_after_seconds;
   // Set for routes `--trace` records; `traced_stream` collects the body bytes
   // a streaming reply delivered.
   bool traced = false;
@@ -2607,7 +2614,8 @@ void HttpServer::handle_connection(int client_fd,
                             "server_error", exception.stable_code());
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     if (exception.retryable()) {
-      resp.headers.emplace_back("Retry-After", "1");
+      resp.headers.emplace_back("Retry-After",
+                                std::to_string(req.retry_after_seconds));
     }
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,

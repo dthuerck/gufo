@@ -260,7 +260,8 @@ const char* StatusReason(int status) noexcept {
   }
 }
 
-HttpResponse GenerationError(const TextGenerationError& exception) {
+HttpResponse GenerationError(const TextGenerationError& exception,
+                             int retry_after_seconds) {
   json::Value response = json::Value::object();
   json::Value error = json::Value::object();
   error["message"] = exception.what();
@@ -275,7 +276,8 @@ HttpResponse GenerationError(const TextGenerationError& exception) {
       .streaming_body = {},
   };
   if (exception.retryable()) {
-    output.headers.emplace_back("Retry-After", "1");
+    output.headers.emplace_back("Retry-After",
+                                std::to_string(retry_after_seconds));
   }
   return output;
 }
@@ -4108,7 +4110,7 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
     return NonStreamingResponse(parsed, backend, generation,
                                 initial_output_state);
   } catch (const TextGenerationError& exception) {
-    return GenerationError(exception);
+    return GenerationError(exception, request.retry_after_seconds);
   } catch (const std::invalid_argument& exception) {
     return Error(400, "Bad Request", exception.what(), "invalid_prompt");
   } catch (const std::length_error& exception) {
@@ -4118,7 +4120,8 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
 }
 
 HttpResponse CountOpenAiInputTokens(const ChatRequest& chat,
-                                    TextGenerationBackend& backend) {
+                                    TextGenerationBackend& backend,
+                                    int retry_after_seconds) {
   try {
     const auto tokens = backend.count_chat_tokens(chat);
     if (!tokens) {
@@ -4138,7 +4141,7 @@ HttpResponse CountOpenAiInputTokens(const ChatRequest& chat,
     counted.body = response.dump();
     return counted;
   } catch (const TextGenerationError& exception) {
-    return GenerationError(exception);
+    return GenerationError(exception, retry_after_seconds);
   } catch (const std::invalid_argument& exception) {
     return Error(400, "Bad Request", exception.what(), "invalid_prompt");
   } catch (const std::length_error& exception) {
@@ -4152,7 +4155,8 @@ HttpResponse HandleOpenAiChatInputTokens(const HttpRequest& request,
   ParsedChatRequest parsed;
   if (auto error = ParseRequest(request, backend, &parsed))
     return std::move(*error);
-  return CountOpenAiInputTokens(parsed.chat, backend);
+  return CountOpenAiInputTokens(parsed.chat, backend,
+                                request.retry_after_seconds);
 }
 
 HttpResponse HandleApplyTemplate(const HttpRequest& request,

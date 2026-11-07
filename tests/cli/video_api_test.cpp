@@ -151,7 +151,8 @@ VideoJobServiceOptions Options(const std::filesystem::path& root,
 
 HttpResponse Send(VideoJobService& service, std::string method,
                   std::string path, std::string body = {},
-                  std::string range = {}, std::string content_type = {}) {
+                  std::string range = {}, std::string content_type = {},
+                  int retry_after_seconds = 1) {
   HttpRequest request{
       .method = std::move(method),
       .path = std::move(path),
@@ -160,6 +161,7 @@ HttpResponse Send(VideoJobService& service, std::string method,
       .headers = {},
       .is_cancelled = {},
   };
+  request.retry_after_seconds = retry_after_seconds;
   if (!range.empty()) {
     request.headers.emplace_back("RaNgE", std::move(range));
   }
@@ -511,10 +513,22 @@ void TestQueueSaturation(const std::filesystem::path& root) {
   const HttpResponse third = Send(service, "POST", "/v1/videos", body);
   Check(first.status == 202 && second.status == 202 && third.status == 429,
         "one active and one queued request enforce bounded admission");
-  Check(std::ranges::any_of(
-            third.headers,
-            [](const auto& header) { return header.first == "Retry-After"; }),
-        "queue saturation supplies Retry-After");
+  Check(std::ranges::any_of(third.headers,
+                            [](const auto& header) {
+                              return header.first == "Retry-After" &&
+                                     header.second == "1";
+                            }),
+        "queue saturation supplies the default one-second Retry-After");
+  // --retry-after sets the wait a saturated queue advertises.
+  const HttpResponse configured =
+      Send(service, "POST", "/v1/videos", body, {}, {}, 6);
+  Check(configured.status == 429 &&
+            std::ranges::any_of(configured.headers,
+                                [](const auto& header) {
+                                  return header.first == "Retry-After" &&
+                                         header.second == "6";
+                                }),
+        "queue saturation reports the configured Retry-After wait");
   Check(Send(service, "DELETE", "/v1/videos/" + CreatedId(first)).status == 200,
         "active request can be cancelled through DELETE");
   runner.WaitForCalls(2);

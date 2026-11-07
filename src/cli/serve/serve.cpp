@@ -232,7 +232,8 @@ void AddCacheRamOption(gufo::cli::ArgParser& parser,
 void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
                       std::size_t* max_connections,
-                      std::size_t* max_request_body_bytes, std::string* api_key,
+                      std::size_t* max_request_body_bytes,
+                      int* retry_after_seconds, std::string* api_key,
                       ServerLogOptions* log) {
   parser.AddOption("-i", "--host", "IP", "Bind address", "Server", host);
   parser.AddOption("-p", "--port", "N", "Port to listen on", "Server", port);
@@ -246,6 +247,12 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
   parser.AddOption("", "--max-request-bytes", "N",
                    "Maximum HTTP request body bytes", "Server",
                    max_request_body_bytes);
+  parser.AddOption(
+      "", "--retry-after", "SECONDS",
+      "Seconds a refused client is asked to wait before retrying;"
+      " the value of the Retry-After header on a 429 or a retryable"
+      " 503 (default: 1)",
+      "Server", retry_after_seconds);
   parser.AddOption("", "--api-key", "KEY", "API key", "Server", api_key);
   parser.AddCustomOption(
       "", "--log-level", "LEVEL", kLogLevelHelp, "Logging",
@@ -270,6 +277,7 @@ struct ServerOptionHelpTargets {
   std::size_t max_connections = 16;
   std::size_t max_request_body_bytes =
       static_cast<std::size_t>(8) * 1024 * 1024;
+  int retry_after_seconds = 1;
   std::string api_key;
   ServerLogOptions log;
 };
@@ -280,7 +288,8 @@ void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
   AddServerOptions(parser, &targets->host, &targets->port,
                    include_sessions ? &targets->session_count : nullptr,
                    &targets->max_connections, &targets->max_request_body_bytes,
-                   &targets->api_key, &targets->log);
+                   &targets->retry_after_seconds, &targets->api_key,
+                   &targets->log);
 }
 
 // Split a `NAME=VALUE` CLI spec. Returns false when either side is empty.
@@ -886,6 +895,7 @@ int RunServe(std::span<const char* const> args) {
   std::size_t max_connections = 16;
   std::size_t max_request_body_bytes =
       static_cast<std::size_t>(8) * 1024 * 1024;
+  int retry_after_seconds = 1;
   std::string api_key;
   ServerLogOptions log_options;
 
@@ -895,9 +905,10 @@ int RunServe(std::span<const char* const> args) {
   ArgParser server_parser("gufo serve");
   const auto add_server_options = [&](ArgParser& parser,
                                       bool include_sessions = true) {
-    AddServerOptions(
-        parser, &host, &port, include_sessions ? &session_count : nullptr,
-        &max_connections, &max_request_body_bytes, &api_key, &log_options);
+    AddServerOptions(parser, &host, &port,
+                     include_sessions ? &session_count : nullptr,
+                     &max_connections, &max_request_body_bytes,
+                     &retry_after_seconds, &api_key, &log_options);
   };
   add_server_options(server_parser);
   std::string subcommand = "llm";
@@ -951,6 +962,10 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: server limits must be positive\n";
       return false;
     }
+    if (retry_after_seconds <= 0) {
+      std::cerr << "Error: --retry-after must be at least 1\n";
+      return false;
+    }
     // Arm verbosity here: this runs after every server option is parsed and
     // before the first loader, cache or HTTP line is written, so one call sets
     // the level for all modalities. `-v/--verbose` is shorthand for
@@ -993,6 +1008,7 @@ int RunServe(std::span<const char* const> args) {
         "event=options host=" + host + " port=" + std::to_string(port) +
         " max_connections=" + std::to_string(max_connections) +
         " max_request_bytes=" + std::to_string(max_request_body_bytes) +
+        " retry_after=" + std::to_string(retry_after_seconds) +
         " api_key=" + (api_key.empty() ? "unset" : "set") +
         " log_level=" + std::string(server::LogLevelName(resolved));
     server::Logger::Debug("server", options_line);
@@ -1700,7 +1716,7 @@ int RunServe(std::span<const char* const> args) {
     // A TP2 worker (rank 1) never serves HTTP.
     std::optional<server::LoadingResponder> loading;
     if (tp_world_size != 2 || tp_rank != 1) {
-      loading.emplace(host, port);
+      loading.emplace(host, port, retry_after_seconds);
     }
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
@@ -1819,6 +1835,7 @@ int RunServe(std::span<const char* const> args) {
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,
           .api_key = std::move(api_key),
+          .retry_after_seconds = retry_after_seconds,
           .on_device_lost =
               [&device_lost] {
                 device_lost.store(true);

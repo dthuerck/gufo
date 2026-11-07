@@ -2498,6 +2498,17 @@ void TestLoadingResponder() {
   ExpectLoading(
       SendParts("127.0.0.1", port, {"GET /hea", "lth HTTP/1.1\r\n", "\r\n"}));
 
+  // The loading window advertises the configured wait, so a supervisor polling
+  // during a load sees what the server itself reports once it serves.
+  {
+    const int configured_port = FreePort();
+    const LoadingResponder configured("127.0.0.1", configured_port, 4);
+    assert(configured.listening());
+    assert(SendParts("127.0.0.1", configured_port,
+                     {"GET /health HTTP/1.1\r\n\r\n"})
+               .find("\r\nRetry-After: 4\r\n") != std::string::npos);
+  }
+
   // The port is held: the real server cannot bind it until stop().
   {
     HttpServer early("127.0.0.1", port, nullptr);
@@ -2654,7 +2665,7 @@ void TestConnectionLimitIgnoresClosingConnections() {
   CompletionGate gate;
   auto* previous_sink = std::clog.rdbuf(&gate);
   {
-    RunningServer server({.max_connections = 2});
+    RunningServer server({.max_connections = 2, .retry_after_seconds = 9});
     const int idle = server.Connect();
     const int answered = server.Connect();
 
@@ -2663,6 +2674,8 @@ void TestConnectionLimitIgnoresClosingConnections() {
     const auto refusal = ReadFramedResponse(refused);
     ExpectStatus(refusal, 503);
     assert(refusal.find("connection limit reached") != std::string::npos);
+    // The refused client learns the configured wait, not a fixed second.
+    assert(refusal.find("\r\nRetry-After: 9\r\n") != std::string::npos);
     net::CloseSocket(refused);
 
     const std::string request =

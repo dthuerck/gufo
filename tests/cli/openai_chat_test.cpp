@@ -2436,6 +2436,14 @@ void TestClientIdentityReachesBackend() {
   }
 }
 
+std::string RetryAfter(const gufo::server::HttpResponse& response) {
+  for (const auto& [name, value] : response.headers) {
+    if (name == "Retry-After")
+      return value;
+  }
+  return {};
+}
+
 void TestStreamingOverloadIsRejectedBeforeHeaders() {
   FakeBackend backend;
   backend.reject_on_start = gufo::server::TextGenerationErrorCode::kQueueFull;
@@ -2452,11 +2460,18 @@ void TestStreamingOverloadIsRejectedBeforeHeaders() {
          "overloaded stream does not commit successful SSE headers");
   Expect(response.body.find("queue_full") != std::string::npos,
          "overload response carries a stable retry code");
-  bool retry_after = false;
-  for (const auto& [name, value] : response.headers) {
-    retry_after = retry_after || (name == "Retry-After" && value == "1");
-  }
-  Expect(retry_after, "retryable overload advertises Retry-After");
+  Expect(RetryAfter(response) == "1",
+         "retryable overload advertises the default one-second wait");
+
+  // --retry-after reaches the refusal through the request the route served.
+  auto configured = Request(R"({
+        "model":"test-model",
+        "messages":[{"role":"user","content":"hello"}]
+      })");
+  configured.retry_after_seconds = 5;
+  const auto delayed = gufo::server::HandleOpenAiChat(configured, backend);
+  Expect(delayed.status == 429 && RetryAfter(delayed) == "5",
+         "the configured wait replaces the default Retry-After");
 }
 
 void TestImagePartsRetainOrderAndIdentity() {

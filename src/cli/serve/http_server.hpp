@@ -36,6 +36,11 @@ struct HttpRequest {
   std::string request_id{};
   /// Transport-derived peer address, never read from client headers.
   std::string client_id{"anonymous"};
+  /// Server policy the listener copies from HttpServerOptions: the seconds a
+  /// refusal asks the client to wait, as `Retry-After`. Routes take their
+  /// options through this request, so a handler that refuses work reads the
+  /// configured value here instead of a literal.
+  int retry_after_seconds{1};
 
   /// URL-decoded value of a query param, or "" if absent.
   std::string query_param(const std::string& key) const;
@@ -95,6 +100,13 @@ struct HttpServerOptions {
   std::size_t max_connections{16};
   std::string api_key;
   std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
+  /// Value of the `Retry-After` header on a refusal that can succeed later:
+  /// the 429 admission refusals, the retryable generation 503s, the refused
+  /// connection, and the loading-window 503. Positive; set from
+  /// `--retry-after`. `device_lost` deliberately carries no `Retry-After` at
+  /// all, because a retry cannot help a dead GPU context.
+  int retry_after_seconds{1};
+
   /// Called once, on the listener or a request thread, when the text backend or
   /// the embedding service reports a lost device. Health, readiness and
   /// generation answer 503 `device_lost` from then on; the hook decides how the
@@ -175,7 +187,10 @@ private:
 /// socket so `HttpServer::start` can bind the same address.
 class LoadingResponder {
 public:
-  LoadingResponder(const std::string& host, int port);
+  /// `retry_after_seconds` is the wait the loading 503 advertises; it matches
+  /// the `Retry-After` the server itself will report once it serves.
+  LoadingResponder(const std::string& host, int port,
+                   int retry_after_seconds = 1);
   ~LoadingResponder();
 
   LoadingResponder(const LoadingResponder&) = delete;
@@ -194,6 +209,7 @@ public:
 private:
   void serve();
 
+  int retry_after_seconds_{1};
   int listen_fd_ = -1;
   std::atomic<bool> stopped_{false};
   std::thread thread_;

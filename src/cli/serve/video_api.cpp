@@ -579,7 +579,8 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   if (created.result == VideoJobResult::kQueueFull) {
     HttpResponse response =
         Error(429, "Too Many Requests", created.error, "video_queue_full");
-    response.headers.emplace_back("Retry-After", "1");
+    response.headers.emplace_back("Retry-After",
+                                  std::to_string(request.retry_after_seconds));
     return response;
   }
   if (created.result != VideoJobResult::kOk || !created.job.has_value()) {

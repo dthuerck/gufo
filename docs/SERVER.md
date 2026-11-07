@@ -1204,7 +1204,7 @@ Use appropriate HTTP status codes:
 - `404` unknown model or endpoint object
 - `409` incompatible session state
 - `413` request or prompt too large
-- `429` admission queue full or rate limit exceeded
+- `429` admission queue full; `Retry-After` reports `--retry-after`
 - `499` internally recorded client cancellation
 - `500` internal failure
 - `503` model or backend unavailable, or GPU context lost (`device_lost`)
@@ -1249,6 +1249,14 @@ bounds admission and output buffering and propagates client cancellation to
 model runners. An in-flight GPU operation may finish before its request retires.
 See [CLI.md](CLI.md) for supported configuration flags.
 
+Every refusal that can succeed later names a wait: 429 admission refusals
+(`queue_full`, `client_queue_full`), the retryable 503s (`output_backpressure`,
+`scheduler_stopping`, the refused connection), the video queue's 429 and the
+loading-window 503 all send `Retry-After` with the `--retry-after` value,
+default 1 second.
+The value is a fixed hint, not a queue-drain estimate. `device_lost` sends no
+`Retry-After`, because a retry cannot revive a lost GPU context.
+
 Admission groups text requests by the socket peer's IP address across chat and
 compatibility endpoints. Caller-provided identity headers do not affect quotas;
 clients behind the same proxy or NAT share a peer quota.
@@ -1273,7 +1281,8 @@ conversations are not implemented.
 While `gufo serve llm` loads its model and walks the disk cache tier, the port
 already answers every request, `/health` included, with 503
 `{"error":{"message":"Loading model","type":"unavailable_error","code":"loading"}}`
-and `Retry-After: 1`, as llama-server does. A refused connection therefore
+and `Retry-After` at the `--retry-after` value (1 second by default, as
+llama-server does). A refused connection therefore
 means the process is not running; supervisors such as llama-swap, which treat
 only a 200 health check as ready, keep waiting until the model is loaded. If
 the address cannot be bound early, the port stays closed until the load ends.
